@@ -32,6 +32,50 @@
 $forums = [];
 
 // ---------------------------------------------------------------------------
+// has_ancestor()  –  circular-dependency guard used by add_or_edit_forum().
+// ---------------------------------------------------------------------------
+
+/**
+ * Check whether $ancestor_id is an ancestor of $forum_id in the tree.
+ *
+ * Walks upward from $forum_id through parent_id links.  Returns true if
+ * $ancestor_id is encountered before reaching the root, which would indicate
+ * a circular reference.
+ *
+ * @param  int   $forum_id    The forum whose ancestry is being checked.
+ * @param  int   $ancestor_id The ID to search for among the ancestors.
+ * @param  array $forums      The flat forums store.
+ * @return bool
+ */
+function has_ancestor(int $forum_id, int $ancestor_id, array $forums): bool
+{
+    $visited = [];
+    $current = $forum_id;
+
+    while ($current !== null) {
+        if (!array_key_exists($current, $forums)) {
+            break;
+        }
+        if (isset($visited[$current])) {
+            // Broken chain – stop to avoid an infinite loop.
+            break;
+        }
+        $visited[$current] = true;
+
+        $parent = $forums[$current]['parent_id'];
+        if ($parent === null) {
+            break;
+        }
+        if ($parent === $ancestor_id) {
+            return true;
+        }
+        $current = $parent;
+    }
+
+    return false;
+}
+
+// ---------------------------------------------------------------------------
 // add_or_edit_forum()
 // ---------------------------------------------------------------------------
 
@@ -88,9 +132,17 @@ function add_or_edit_forum(array $data, array &$forums): int
         if (!array_key_exists($parent_id, $forums)) {
             throw new InvalidArgumentException("parent_id {$parent_id} does not exist in the forums list.");
         }
-        // Prevent a forum from being its own ancestor.
-        if ($id !== null && $parent_id === $id) {
-            throw new InvalidArgumentException("A forum cannot be its own parent.");
+        if ($id !== null) {
+            // Prevent direct self-parenting.
+            if ($parent_id === $id) {
+                throw new InvalidArgumentException("A forum cannot be its own parent.");
+            }
+            // Prevent circular ancestry (e.g. A → B → A).
+            if (has_ancestor($parent_id, $id, $forums)) {
+                throw new InvalidArgumentException(
+                    "Setting parent_id to {$parent_id} would create a circular reference."
+                );
+            }
         }
     }
 
@@ -120,9 +172,21 @@ function add_or_edit_forum(array $data, array &$forums): int
     // Add a new forum.
     // -----------------------------------------------------------------------
 
-    // Auto-generate an ID if none was supplied (or the supplied ID is new).
+    // Use a static counter so ID generation is O(1) regardless of list size.
+    static $next_id = 1;
+
     if ($id === null) {
-        $id = empty($forums) ? 1 : max(array_keys($forums)) + 1;
+        // Ensure we never collide with a manually supplied ID that was already
+        // inserted into $forums by a previous call that bypassed the counter.
+        while (array_key_exists($next_id, $forums)) {
+            $next_id++;
+        }
+        $id = $next_id++;
+    } else {
+        // A specific new ID was provided; advance the counter past it.
+        if ($id >= $next_id) {
+            $next_id = $id + 1;
+        }
     }
 
     $forums[$id] = [
